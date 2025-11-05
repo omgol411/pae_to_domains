@@ -1,26 +1,81 @@
-def parse_pae_file(pae_json_file):
-    import json, numpy
+# Author: Tristan Croll
+# Github: https://github.com/tristanic/pae_to_domains
+# Modified by OMG
 
-    with open(pae_json_file, 'rt') as f:
-        data = json.load(f)[0]
+def parse_pae_file(pae_file):
+    #! modified to handle both AF2 and AF3 PAE formats
 
-    if 'residue1' in data and 'distance' in data:
-        # Legacy PAE format, keep for backwards compatibility.
-        r1, d = data['residue1'], data['distance']
-        size = max(r1)
-        matrix = numpy.empty((size, size), dtype=numpy.float64)
-        matrix.ravel()[:] = d
-    elif 'predicted_aligned_error' in data:
-        # New PAE format.
-        matrix = numpy.array(data['predicted_aligned_error'], dtype=numpy.float64)
+    import numpy, os
+    ext = os.path.splitext(pae_file)[1]
+
+    if ext == '.json':
+        import json
+        with open(pae_file, 'r') as f:
+            data = json.load(f)
+    elif ext == '.pkl':
+        import pickle
+        with open(pae_file, 'rb') as f:
+            data = pickle.load(f)
+    else:
+        raise Exception('Invalid file format. Must be either JSON or pickle.')
+
+    if isinstance(data, list):
+        data = data[0]
+
+    if 'pae' in data:
+        # AF3
+        matrix = numpy.array(data['pae'], dtype=numpy.float64)
+
+    elif "predicted_aligned_error" in data:
+        # AF2
+        matrix = numpy.array(data["predicted_aligned_error"], dtype=numpy.float64)
+
+    #! Legacy PAE format
+    # with open(pae_json_file, 'rt') as f:
+    #     data = json.load(f)[0]
+
+    # if 'residue1' in data and 'distance' in data:
+    #     # Legacy PAE format, keep for backwards compatibility.
+    #     r1, d = data['residue1'], data['distance']
+    #     size = max(r1)
+    #     matrix = numpy.empty((size, size), dtype=numpy.float64)
+    #     matrix.ravel()[:] = d
+
     else:
         raise ValueError('Invalid PAE JSON format.')
-    
+
     return matrix
 
-def domains_from_pae_matrix_networkx(pae_matrix, pae_power=1, pae_cutoff=5, graph_resolution=1):
+def domains_from_pae_matrix_label_propagation(pae_matrix, pae_power=1, pae_cutoff=5, random_seed=1):
+    try:
+        import networkx
+    except ImportError:
+        print('ERROR: This method requires NetworkX to be installed. Please install it using "pip install networkx" '
+            'in a Python >=3.6 environment and try again.')
+        import sys
+        sys.exit()
+    import numpy
+    weights = 1/pae_matrix**pae_power
+
+    g = networkx.Graph()
+    size = weights.shape[0]
+    g.add_nodes_from(range(size))
+    print(pae_cutoff)
+    edges = numpy.argwhere(pae_matrix < pae_cutoff)
+    sel_weights = weights[edges.T[0], edges.T[1]]
+    wedges = [(i,j,w) for (i,j),w in zip(edges,sel_weights)]
+    g.add_weighted_edges_from(wedges)
+
+    from networkx.algorithms import community
+
+    clusters = list(community.fast_label_propagation_communities(g, weight='weight' ,seed=random_seed)) # type: ignore
+    clusters = [list(c) for c in clusters]
+    # print(clusters)
+    return clusters
+
+def domains_from_pae_matrix_networkx(pae_matrix, pae_power=1, pae_cutoff=5, graph_resolution:float=1):
     '''
-    Takes a predicted aligned error (PAE) matrix representing the predicted error in distances between each 
+    Takes a predicted aligned error (PAE) matrix representing the predicted error in distances between each
     pair of residues in a model, and uses a graph-based community clustering algorithm to partition the model
     into approximately rigid groups.
 
@@ -55,12 +110,24 @@ def domains_from_pae_matrix_networkx(pae_matrix, pae_power=1, pae_cutoff=5, grap
 
     from networkx.algorithms import community
 
-    clusters = community.greedy_modularity_communities(g, weight='weight', resolution=graph_resolution)
+    clusters = community.greedy_modularity_communities(g, weight='weight', resolution=graph_resolution) # type: ignore
+
+    if isinstance(clusters, list):
+        clusters = [list(c) for c in clusters]
+    else:
+        raise ValueError(
+            f"""
+
+            Unexpected output type from community detection algorithm.
+            Expected a list of frozen sets, but got {type(clusters)}.
+            """
+        )
+
     return clusters
 
 def domains_from_pae_matrix_igraph(pae_matrix, pae_power=1, pae_cutoff=5, graph_resolution=1):
     '''
-    Takes a predicted aligned error (PAE) matrix representing the predicted error in distances between each 
+    Takes a predicted aligned error (PAE) matrix representing the predicted error in distances between each
     pair of residues in a model, and uses a graph-based community clustering algorithm to partition the model
     into approximately rigid groups.
 
@@ -139,4 +206,4 @@ if __name__ == '__main__':
             outfile.write(','.join([str(e) for e in c])+'\n')
     end_time = time()
     print(f'Wrote {len(clusters)} clusters to {output_file}. Biggest cluster contains {max_len} residues. Run time was {end_time-start_time:.2f} seconds.')
-    
+
